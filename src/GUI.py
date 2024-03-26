@@ -11,6 +11,7 @@ class ParticleFilterGUI:
     """
     GUI for the particle filter
     """
+    estimated_pose_size = 10
 
     def __init__(self,
                  particle_filter: ParticleFilter,  # particle_filter is an instance of ParticleFilter
@@ -18,14 +19,16 @@ class ParticleFilterGUI:
                  pose_size: int = 10,  # size of the pose in pixels
                  particle_size: int = 4,  # size of the particle in pixels
                  landmark_size: int = 10,  # size of the landmark in pixels
+                 real_pose: tuple = None,  # real pose of the robot this is used for testing only
                  ):
 
         # TEMP: for testing only
 
-        self.real_pose = (10, 10, np.random.uniform(0, 2 * np.pi), 1)
+        self.real_pose = real_pose
+        self.estimated_pose = None
         self.last_key_pressed = None
         self.move_distance = 5
-        self.turn_angle = np.pi / 2
+        self.turn_angle = np.pi / 4
 
         # END TEMP
 
@@ -70,16 +73,20 @@ class ParticleFilterGUI:
         Update the GUI
         :return: None
         """
+
+        start_time = time.time_ns()
+
         # updates
         update_all = False
         update_obstacles = False
-        update_particles = False
-        update_poses = False
+        update_particles = True
+        updated_real_pose = True
+        update_estimated_poses = True
 
         # get user input
-        requested_motion = self.get_user_input()
-        update_poses = requested_motion != (0, 0)
-        update_particles = requested_motion != (0, 0)
+        # requested_motion = self.get_user_input()
+        requested_motion = self.random_motion()
+        # update_particles = requested_motion != (0, 0)
 
         # update the real poses of the robots
         if requested_motion != (0, 0):
@@ -90,43 +97,89 @@ class ParticleFilterGUI:
             theta += angle
             self.real_pose = (x, y, theta, 1)
 
-        ray_distance = None
-        for boundary in self.particle_filter.boundaries:
-            intersection = self.particle_filter.cast_ray(self.real_pose, boundary)
-            if intersection is not None:
-                x, y = intersection
-                # distance to the wall
-                d = np.sqrt((self.real_pose[0] - x) ** 2 + (self.real_pose[1] - y) ** 2)
-                if ray_distance is None or d < ray_distance:
-                    ray_distance = d
+        # angles = [np.pi / 4, 0, 11 * np.pi / 6]
+        angles = np.linspace(0, 2 * np.pi, 11)[:-1]
+        distances = []
+        intersections = []
+        for angle in angles:
+            closest_wall = None
+            for boundary in self.particle_filter.boundaries:
+                intersection = self.particle_filter.cast_ray(self.real_pose, boundary, angle)
+                if intersection is not None:
+                    x, y = intersection
+                    # distance to the wall
+                    d = np.sqrt((self.real_pose[0] - x) ** 2 + (self.real_pose[1] - y) ** 2)
+                    if closest_wall is None or d < closest_wall[0]:
+                        closest_wall = d, intersection
+            if closest_wall is not None:
+                distances.append(closest_wall[0])
+                intersections.append(closest_wall[1])
+            else:
+                distances.append(float("inf"))
+                intersections.append((self.real_pose[0], self.real_pose[1]))
 
+        # print(len(distances), len(angles), len(intersections), distances)
         # update the particle filter
-        self.particle_filter.update(requested_motion, measurements=[ray_distance])
+        pf_start_time = time.time_ns()
+        self.estimated_pose = self.particle_filter.update(requested_motion, sensor_measurements=distances,
+                                                          sensor_angles=angles)
+        pf_end_time = time.time_ns()
 
-        if update_all or update_obstacles and update_particles and update_poses:
+        gui_start_time = time.time_ns()
+        if update_all or update_obstacles and update_particles and updated_real_pose and update_estimated_poses:
             self.canvas.delete("all")
             self.draw_grid()
-            self.draw_particles(self.particle_filter.particles)
-            self.draw_real_pose(self.real_pose)
-            # self.draw_estimated_poses()
-            self.draw_landmarks(self.particle_filter.landmarks)
             self.draw_boundaries(self.particle_filter.boundaries)
-        elif update_particles or update_poses:
-            self.canvas.delete("pose")
-            self.canvas.delete("particle")
+            self.draw_landmarks(self.particle_filter.landmarks)
             self.draw_particles(self.particle_filter.particles)
-            self.draw_real_pose(self.real_pose)
-            # self.draw_estimated_poses()
+            self.draw_real_pose(self.real_pose, intersections)
+            self.draw_estimated_poses(self.estimated_pose)
+        elif update_particles and updated_real_pose and update_estimated_poses:
+            self.canvas.delete("particle")
+            self.canvas.delete("real_pose")
+            self.canvas.delete("estimated_pose")
+            self.draw_particles(self.particle_filter.particles)
+            self.draw_real_pose(self.real_pose, intersections)
+            self.draw_estimated_poses(self.estimated_pose)
+        elif update_particles or updated_real_pose:
+            self.canvas.delete("particle")
+            self.canvas.delete("real_pose")
+            self.draw_particles(self.particle_filter.particles)
+            self.draw_real_pose(self.real_pose, intersections)
         elif update_obstacles:
             self.canvas.delete("obstacle")
             self.canvas.delete("free")
             self.draw_grid()
+        elif update_estimated_poses:
+            self.canvas.delete("estimated_pose")
+            self.draw_estimated_poses(self.estimated_pose)
         else:
             # print("No updates")
             pass
+        gui_end_time = time.time_ns()
+        end_time = gui_end_time
+        print(
+            f"update time (ms): {(end_time - start_time) / 1e+6}, pf time (ms): {(pf_end_time - pf_start_time) / 1e+6}"
+            f", gui time (ms): {(gui_end_time - gui_start_time) / 1e+6}")
 
         # self.particle_filter.update(motion=(np.random.normal(0, 5), np.random.normal(0, 2 * np.pi)))
         self.root.after(1, self.update)
+
+    def random_motion(self):
+        """
+        Generate a random legal motion for the robot
+        :return: (distance, angle) where distance is the distance to move and angle is the angle to turn
+        """
+        i = 0
+        while True:
+            distance, angle = np.random.normal(0, 5), np.random.normal(np.pi / 4, np.pi / 4)
+            new_x = self.real_pose[0] + np.cos(self.real_pose[2]) * distance
+            new_y = self.real_pose[1] + np.sin(self.real_pose[2]) * distance
+            if self.particle_filter.is_free(new_x, new_y):
+                return distance, angle
+            i += 1
+            if i > 100:
+                raise Exception("No legal motion found")
 
     def key_pressed(self, event):
         """
@@ -139,7 +192,7 @@ class ParticleFilterGUI:
     def get_user_input(self):
         """
         Get user input for the motion model
-        :return: requested motion, (distance, angle) where distance is the distance to move and angle is the angle to turn
+        :return: requested motion, (linear, angular)
         """
         move_distance = 0
         turn_angle = 0
@@ -165,7 +218,7 @@ class ParticleFilterGUI:
                 if self.particle_filter.occupancy_map[i, j] > 0:
                     self.draw_box(i, j, color="black", tag="obstacle")
                 else:
-                    self.draw_box(i, j, color="white", tag="free")
+                    self.draw_box(i, j, color="light grey", tag="free")
 
     def draw_box(self, x, y, color="black", tag=None):
         """
@@ -189,45 +242,57 @@ class ParticleFilterGUI:
                                          (y + 1) * self.box_size,
                                          fill=color)
 
-    def draw_real_pose(self, pose):
+    def draw_real_pose(self, pose, rays=None):
         """
         Draw the poses on the canvas, each pose represent the estimated pose of a robot
         :param pose: List of poses to draw, each pose is a tuple (x, y, theta)
+        :param rays: List of rays to draw, each ray is a tuple (x, y)
         :return:
         """
         x, y, theta, _ = pose
+
+        if rays is not None:
+            for ray in rays:
+                self.canvas.create_line(x * self.box_size,
+                                        y * self.box_size,
+                                        ray[0] * self.box_size,
+                                        ray[1] * self.box_size,
+                                        fill="teal", tags="real_pose", width=2)
+
         self.canvas.create_oval((x * self.box_size) - (self.pose_size / 2),
                                 (y * self.box_size) - (self.pose_size / 2),
                                 (x * self.box_size) + (self.pose_size / 2),
                                 (y * self.box_size) + (self.pose_size / 2),
-                                fill="blue", outline="blue", tags="pose")
+                                fill="blue", outline="blue", tags="real_pose")
         # Draw a line to show the orientation of the pose
         self.canvas.create_line(x * self.box_size,
                                 y * self.box_size,
                                 (x * self.box_size) + (np.cos(theta) * self.pose_size * 2),
                                 (y * self.box_size) + (np.sin(theta) * self.pose_size * 2),
-                                fill="orange", tags="pose")
+                                fill="orange", tags="real_pose")
 
-    def draw_estimated_poses(self, poses):
+    def draw_estimated_poses(self, pose):
         """
         Draw the poses on the canvas, each pose represent the estimated pose of a robot
-        :param poses: List of poses to draw, each pose is a tuple (x, y, theta)
+        :param pose: List of poses to draw, each pose is a tuple (x, y, theta)
         :return:
         """
-        for pose in poses:
-            x, y, theta = pose
-            # Draw a blue dot for each pose
-            self.canvas.create_oval((x * self.box_size) - (self.pose_size / 2),
-                                    (y * self.box_size) - (self.pose_size / 2),
-                                    (x * self.box_size) + (self.pose_size / 2),
-                                    (y * self.box_size) + (self.pose_size / 2),
-                                    fill="green", outline="green", tags="pose")
-            # Draw a line to show the orientation of the pose
-            self.canvas.create_line(x * self.box_size,
-                                    y * self.box_size,
-                                    (x * self.box_size) + (np.cos(theta) * self.pose_size * 2),
-                                    (y * self.box_size) + (np.sin(theta) * self.pose_size * 2),
-                                    fill="orange", tags="pose")
+        # x, y, theta = pose
+        x = pose[0]
+        y = pose[1]
+        theta = pose[2]
+        # Draw a blue dot for each pose
+        self.canvas.create_oval((x * self.box_size) - (self.estimated_pose_size / 2),
+                                (y * self.box_size) - (self.estimated_pose_size / 2),
+                                (x * self.box_size) + (self.estimated_pose_size / 2),
+                                (y * self.box_size) + (self.estimated_pose_size / 2),
+                                fill="green", outline="green", tags="estimated_pose")
+        # Draw a line to show the orientation of the pose
+        self.canvas.create_line(x * self.box_size,
+                                y * self.box_size,
+                                (x * self.box_size) + (np.cos(theta) * self.estimated_pose_size * 2),
+                                (y * self.box_size) + (np.sin(theta) * self.estimated_pose_size * 2),
+                                fill="orange", tags="estimated_pose")
 
     def draw_particles(self, particles):
         """
@@ -235,14 +300,25 @@ class ParticleFilterGUI:
         :return: None
         """
         for particle in particles:
-            x, y, theta, _ = particle
+            x, y, theta, prob = particle
+
+            if prob < 0:
+                color = "black"
+            elif 0 < prob < 25:
+                color = "red"
+            elif 25 < prob < 50:
+                color = "deep pink"
+            elif 50 < prob < 75:
+                color = "yellow"
+            else:
+                color = "green"
+
             # Draw a red dot for each particle
-            # TODO: check the oval is being drawn correctly, it should be centered at (x, y)
             self.canvas.create_oval((x * self.box_size) - (self.particle_size / 2),
                                     (y * self.box_size) - (self.particle_size / 2),
                                     (x * self.box_size) + (self.particle_size / 2),
                                     (y * self.box_size) + (self.particle_size / 2),
-                                    fill="red", outline="red", tags="particle")
+                                    fill=color, outline=color, tags="particle")
             # Draw a line to show the orientation of the particle
             self.canvas.create_line(x * self.box_size,
                                     y * self.box_size,
@@ -262,7 +338,7 @@ class ParticleFilterGUI:
                                     y1 * self.box_size,
                                     x2 * self.box_size,
                                     y2 * self.box_size,
-                                    fill="orange", tags="boundary")
+                                    fill="orange", tags="boundary", width=2)
 
     def draw_landmarks(self, landmarks):
         """
@@ -295,16 +371,80 @@ if __name__ == "__main__":
     m[:, 0] = 1
     m[:, -1] = 1
     print(m)
-    lm = np.array([(10, 10, .25 * np.pi), (20, 20, .75 * np.pi), (30, 30, 1.25 * np.pi)])
-    bounds = np.array([(0.5, 0.5, 0.5, 99.5),
-                           (0.5, 0.5, 99.5, 0.5),
-                           (99.5, 0.5, 99.5, 99.5),
-                           (0.5, 99.5, 99.5, 99.5)])
 
-    pf = ParticleFilter(m, 1000, landmarks=lm, boundaries=bounds)
+    lm = np.array([
+        (10, 10, .25 * np.pi),
+        (20, 20, .75 * np.pi),
+        (30, 30, 1.25 * np.pi)
+    ])
+
+    bounds = np.array([(0.5, 0.5, 0.5, 99.5),
+                       (0.5, 0.5, 99.5, 0.5),
+                       (99.5, 0.5, 99.5, 99.5),
+                       (0.5, 99.5, 99.5, 99.5),
+                       (30, 0.5, 30, 30),
+                       (0.5, 30, 30, 30),
+                       (75, 75, 75, 80),
+                       (75, 75, 80, 75),
+                       (75, 80, 80, 80),
+                       (80, 75, 80, 80),
+                       ])
+
+
+    def generate_random_squares(num_squares):
+        """
+        Generate random squares
+        :param num_squares: number of squares to generate
+        :return: list of squares, each square is four lines each line is a tuple (x1, y1, x2, y2)
+        """
+        lines = []
+        for _ in range(num_squares):
+            # Randomly choose the bottom-left corner of the square
+            x1 = np.random.randint(0, 90)  # Leave space for the square
+            y1 = np.random.randint(0, 90)  # Leave space for the square
+
+            # Assume the square's side length is 10
+            x2 = x1 + 10
+            y2 = y1 + 10
+
+            # Add the square's coordinates to the list
+            # squares.append((x1, y1, x2, y2))
+            lines.append([(x1, y1, x2, y1),  # Bottom line
+                          (x2, y1, x2, y2),  # Right line
+                          (x2, y2, x1, y2),  # Top line
+                          (x1, y2, x1, y1)]  # Left line
+                         )
+
+        return lines
+
+
+    boxes = generate_random_squares(5)
+    for box in boxes:
+        bounds = np.concatenate((bounds, box), axis=0)
+
+    pf = ParticleFilter(m, 1000, boundaries=bounds, use_multiprocessing=True)
+
+    for b in bounds:
+        pf.calculate_obstacle_occupancy(b)
+
+    # pf.calculate_obstacle_occupancy(bounds[0])
+    # pf.calculate_obstacle_occupancy(bounds[1])
+    # pf.calculate_obstacle_occupancy(bounds[6])
+
+    # for b in bounds:
+    #     pf.calculate_obstacle_occupancy(b)
+    # exit(0)
+
+    pf.add_landmarks(lm)
+
+    possible_angles = np.linspace(0, 2 * np.pi, 8)
+    real_x, real_y, _, _ = pf.random_free_place()
+    _real_pose = (real_x, real_y, np.random.choice(possible_angles), 1)
+
+    # pf.start(starting_pose=_real_pose)
     pf.start()
 
-    gui = ParticleFilterGUI(pf)
+    gui = ParticleFilterGUI(pf, real_pose=_real_pose)
 
     # while True:
     #     # pf.update()

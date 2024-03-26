@@ -14,3 +14,6 @@ Some interesting features of this particle filter are/will be:
 * Support for sensors such as LIDAR and cameras
 * Support for different types of motion models
 * More to come!
+
+## Future Work
+* ROS2 integration
